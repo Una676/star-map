@@ -1,0 +1,1029 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>宇宙星图 · Cosmic Constellation</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #0a0a0f;
+    overflow: hidden;
+    font-family: 'Segoe UI', system-ui, sans-serif;
+    cursor: crosshair;
+    user-select: none;
+    -webkit-user-select: none;
+    -webkit-tap-highlight-color: transparent;
+    touch-action: manipulation;
+  }
+  canvas { display: block; }
+  
+  #hint {
+    position: fixed;
+    bottom: 40px;
+    left: 50%;
+    transform: translateX(-50%);
+    color: rgba(255,255,255,0.5);
+    font-size: 14px;
+    letter-spacing: 2px;
+    pointer-events: none;
+    transition: opacity 1.5s;
+    z-index: 10;
+  }
+  
+  #stats {
+    position: fixed;
+    top: 24px;
+    right: 28px;
+    color: rgba(255,255,255,0.6);
+    font-size: 12px;
+    font-family: 'Courier New', monospace;
+    pointer-events: none;
+    z-index: 10;
+    line-height: 1.8;
+  }
+
+  #controls {
+    position: fixed;
+    bottom: 20px;
+    left: 50%;
+    transform: translateX(-50%);
+    display: flex;
+    gap: 16px;
+    z-index: 10;
+    flex-wrap: wrap;
+    justify-content: center;
+  }
+  .ctrl-btn {
+    background: rgba(255,255,255,0.06);
+    border: 1px solid rgba(255,255,255,0.12);
+    color: rgba(255,255,255,0.7);
+    padding: 6px 14px;
+    border-radius: 20px;
+    font-size: 12px;
+    cursor: pointer;
+    transition: all 0.3s;
+    letter-spacing: 1px;
+    font-family: inherit;
+    backdrop-filter: blur(10px);
+    -webkit-tap-highlight-color: transparent;
+  }
+  .ctrl-btn:hover {
+    background: rgba(255,255,255,0.12);
+    border-color: rgba(255,255,255,0.25);
+    color: #fff;
+    box-shadow: 0 0 20px rgba(150,180,255,0.15);
+  }
+  .ctrl-btn.active {
+    background: rgba(150,180,255,0.2);
+    border-color: rgba(150,180,255,0.5);
+    color: #fff;
+    box-shadow: 0 0 16px rgba(150,180,255,0.25);
+  }
+
+  /* ── Mobile tweaks ── */
+  @media (max-width: 768px) {
+    #hint { bottom: 80px; font-size: 12px; }
+    #stats { top: 12px; right: 14px; font-size: 10px; }
+    #controls { bottom: 12px; gap: 8px; }
+    .ctrl-btn { padding: 5px 10px; font-size: 10px; border-radius: 16px; }
+  }
+
+  #toast {
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%) scale(0);
+    color: #fff;
+    font-size: 20px;
+    letter-spacing: 4px;
+    pointer-events: none;
+    z-index: 20;
+    transition: transform 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275), opacity 0.5s;
+    opacity: 0;
+    text-shadow: 0 0 30px rgba(150,180,255,0.8);
+  }
+  #toast.show {
+    transform: translate(-50%, -50%) scale(1);
+    opacity: 1;
+  }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hint">移动鼠标 · 连接星辰</div>
+<div id="stats"></div>
+<div id="toast"></div>
+<div id="controls">
+  <button class="ctrl-btn active" data-mode="0">🌌 默认</button>
+  <button class="ctrl-btn" data-mode="1">🔷 密网</button>
+  <button class="ctrl-btn" data-mode="2">🏹 猎户</button>
+  <button class="ctrl-btn" id="btnVortex">🌀 漩涡</button>
+  <button class="ctrl-btn" id="btnWave">💫 脉冲</button>
+</div>
+
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+const hint = document.getElementById('hint');
+const statsEl = document.getElementById('stats');
+const toast = document.getElementById('toast');
+
+const DPR = Math.min(window.devicePixelRatio || 1, 2);
+
+let W, H;
+let mouseX = -999, mouseY = -999;
+let mouseActive = false;
+let frame = 0, lastParticleSpawn = 0;
+
+// ── Spatial Grid for O(n) neighbor lookup ──
+let gridCellSize, gridCols, gridRows, spatialGrid;
+function buildGrid() {
+  gridCellSize = CONNECTION_DIST || 160;
+  gridCols = Math.ceil(W / gridCellSize) + 1;
+  gridRows = Math.ceil(H / gridCellSize) + 1;
+  spatialGrid = new Array(gridCols * gridRows);
+  for (let i = 0; i < spatialGrid.length; i++) spatialGrid[i] = [];
+}
+function clearGrid() {
+  for (let i = 0; i < spatialGrid.length; i++) spatialGrid[i].length = 0;
+}
+function insertStar(star, idx) {
+  const cx = Math.floor(star.x / gridCellSize);
+  const cy = Math.floor(star.y / gridCellSize);
+  if (cx >= 0 && cx < gridCols && cy >= 0 && cy < gridRows) {
+    spatialGrid[cy * gridCols + cx].push(idx);
+  }
+}
+
+// --- Modes ---
+let currentMode = 0; // 0=default, 1=dense web, 2=orion
+let vortexActive = false;
+let vortexX = 0, vortexY = 0;
+let vortexStrength = 0;
+
+// --- Stars ---
+const stars = [];
+let STAR_COUNT = 300;
+let CONNECTION_DIST = 160;
+let MOUSE_CONNECTION_DIST = 220;
+const MOUSE_RADIUS = 65;
+
+const modeConfig = {
+  0: { count: 300, connDist: 160, mouseDist: 220, label: '默认星图' },
+  1: { count: 500, connDist: 200, mouseDist: 280, label: '密网星图' },
+  2: { count: 350, connDist: 250, mouseDist: 300, label: '猎户星图' },
+};
+
+const constellationNames = [
+  '天龙座', '凤凰座', '麒麟座', '天琴座', '猎户座',
+  '仙后座', '天鹰座', '天鹅座', '天蝎座', '飞马座',
+  '大熊座', '小熊座', '仙女座', '英仙座', '天马座',
+  '玉衡', '天枢', '摇光', '紫微', '太微',
+];
+
+class Star {
+  constructor() {
+    this.reset(true);
+  }
+  reset(initial) {
+    this.x = Math.random() * W;
+    this.y = Math.random() * H;
+    this.vx = (Math.random() - 0.5) * 0.3;
+    this.vy = (Math.random() - 0.5) * 0.3;
+    this.radius = Math.random() * 2.5 + 0.8;
+    this.baseAlpha = Math.random() * 0.5 + 0.3;
+    this.alpha = this.baseAlpha;
+    this.twinkleSpeed = Math.random() * 0.02 + 0.005;
+    this.twinkleOffset = Math.random() * Math.PI * 2;
+    this.hue = Math.random() * 60 + 200;
+    if (Math.random() < 0.15) {
+      this.hue = Math.random() * 30 + 30;
+    }
+    this.saturation = Math.random() * 40 + 50;
+    this.lightness = Math.random() * 30 + 60;
+    if (!initial) {
+      this.alpha = this.baseAlpha;
+    }
+    // For vortex
+    this.trappedVx = 0;
+    this.trappedVy = 0;
+  }
+  update() {
+    // Vortex pull
+    if (vortexActive && vortexStrength > 0) {
+      const dx = vortexX - this.x;
+      const dy = vortexY - this.y;
+      const d = Math.sqrt(dx * dx + dy * dy);
+      if (d < 300 && d > 1) {
+        const force = vortexStrength * (1 - d / 300) * 2;
+        this.trappedVx += (dx / d) * force;
+        this.trappedVy += (dy / d) * force;
+        // Spiral
+        this.trappedVx += (-dy / d) * force * 0.5;
+        this.trappedVy += (dx / d) * force * 0.5;
+      }
+    }
+    
+    // Damping
+    this.trappedVx *= 0.95;
+    this.trappedVy *= 0.95;
+    
+    this.x += this.vx + this.trappedVx;
+    this.y += this.vy + this.trappedVy;
+    
+    if (this.x < -20) this.x = W + 20;
+    if (this.x > W + 20) this.x = -20;
+    if (this.y < -20) this.y = H + 20;
+    if (this.y > H + 20) this.y = -20;
+    
+    this.alpha = this.baseAlpha + Math.sin(frame * this.twinkleSpeed + this.twinkleOffset) * 0.25;
+  }
+  draw(ctx) {
+    const glow = ctx.createRadialGradient(this.x, this.y, 0, this.x, this.y, this.radius * 6);
+    glow.addColorStop(0, `hsla(${this.hue}, ${this.saturation}%, ${this.lightness}%, ${this.alpha})`);
+    glow.addColorStop(0.3, `hsla(${this.hue}, ${this.saturation}%, ${this.lightness}%, ${this.alpha * 0.6})`);
+    glow.addColorStop(1, 'transparent');
+    ctx.beginPath();
+    ctx.arc(this.x, this.y, this.radius * 6, 0, Math.PI * 2);
+    ctx.fillStyle = glow;
+    ctx.fill();
+    
+    const core = ctx.createRadialGradient(this.x, this.y, 0, this.x, this.y, this.radius * 2);
+    core.addColorStop(0, `hsla(${this.hue}, ${this.saturation}%, ${Math.min(100, this.lightness + 15)}%, ${Math.min(1, this.alpha + 0.4)})`);
+    core.addColorStop(1, 'transparent');
+    ctx.beginPath();
+    ctx.arc(this.x, this.y, this.radius * 2, 0, Math.PI * 2);
+    ctx.fillStyle = core;
+    ctx.fill();
+    
+    ctx.beginPath();
+    ctx.arc(this.x, this.y, this.radius * 1.3, 0, Math.PI * 2);
+    ctx.fillStyle = `hsla(${this.hue}, ${this.saturation}%, ${Math.min(100, this.lightness + 20)}%, ${Math.min(1, this.alpha + 0.5)})`;
+    ctx.fill();
+  }
+}
+
+// --- Shooting Stars ---
+const shootingStars = [];
+function spawnShootingStar() {
+  const angle = Math.random() * Math.PI * 0.5 + Math.PI * 0.25;
+  const speed = Math.random() * 6 + 4;
+  shootingStars.push({
+    x: Math.random() * W * 0.8,
+    y: Math.random() * H * 0.3,
+    vx: Math.cos(angle) * speed,
+    vy: Math.sin(angle) * speed,
+    life: 1,
+    decay: Math.random() * 0.015 + 0.01,
+    length: Math.random() * 60 + 40,
+  });
+}
+
+// ── Caps ──
+const MAX_PARTICLES = 400;
+const MAX_WAVES = 6;
+const MAX_VP = 80;
+
+// --- Particles ---
+const particles = [];
+class Particle {
+  constructor(x, y, hue) {
+    this.x = x;
+    this.y = y;
+    const angle = Math.random() * Math.PI * 2;
+    const speed = Math.random() * 1.5 + 0.5;
+    this.vx = Math.cos(angle) * speed;
+    this.vy = Math.sin(angle) * speed;
+    this.life = 1;
+    this.decay = Math.random() * 0.02 + 0.01;
+    this.size = Math.random() * 2.5 + 0.5;
+    this.hue = hue || Math.random() * 60 + 200;
+  }
+  update() {
+    // Vortex pull on particles too
+    if (vortexActive && vortexStrength > 0) {
+      const dx = vortexX - this.x;
+      const dy = vortexY - this.y;
+      const d = Math.sqrt(dx * dx + dy * dy);
+      if (d < 300 && d > 1) {
+        const force = vortexStrength * (1 - d / 300) * 3;
+        this.vx += (dx / d) * force;
+        this.vy += (dy / d) * force;
+      }
+    }
+    this.x += this.vx;
+    this.y += this.vy;
+    this.life -= this.decay;
+  }
+  draw(ctx) {
+    if (this.life <= 0) return;
+    const glow = ctx.createRadialGradient(this.x, this.y, 0, this.x, this.y, this.size * 3);
+    glow.addColorStop(0, `hsla(${this.hue}, 80%, 70%, ${this.life})`);
+    glow.addColorStop(1, 'transparent');
+    ctx.beginPath();
+    ctx.arc(this.x, this.y, this.size * 3, 0, Math.PI * 2);
+    ctx.fillStyle = glow;
+    ctx.fill();
+  }
+}
+
+function addParticle(x, y, hue) {
+  if (particles.length >= MAX_PARTICLES) particles.shift();
+  particles.push(new Particle(x, y, hue));
+}
+function burstParticles(x, y, count, hue) {
+  for (let i = 0; i < count; i++) addParticle(x, y, hue);
+}
+
+// --- Pulse waves ---
+const waves = [];
+function spawnWave(x, y) {
+  if (waves.length >= MAX_WAVES) waves.shift();
+  waves.push({
+    x, y,
+    radius: 0,
+    maxRadius: Math.min(W, H) * 0.6,
+    life: 1,
+    speed: 6,
+    hue: Math.random() * 60 + 200,
+  });
+}
+
+// --- Vortex particles (visual) ---
+const vortexParticles = [];
+function spawnVortexParticles() {
+  for (let i = 0; i < 6; i++) {
+    const angle = Math.random() * Math.PI * 2;
+    const dist = Math.random() * 200;
+    vortexParticles.push({
+      angle,
+      dist,
+      speed: (Math.random() - 0.5) * 0.05,
+      life: 1,
+      decay: Math.random() * 0.008 + 0.004,
+      size: Math.random() * 1.5 + 0.5,
+    });
+  }
+  if (vortexParticles.length > MAX_VP) vortexParticles.splice(0, vortexParticles.length - MAX_VP);
+}
+
+// --- Init ---
+function resize() {
+  W = window.innerWidth;
+  H = window.innerHeight;
+  canvas.width = W * DPR;
+  canvas.height = H * DPR;
+  canvas.style.width = W + 'px';
+  canvas.style.height = H + 'px';
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  buildGrid();
+}
+
+function applyMode(mode) {
+  const cfg = modeConfig[mode];
+  STAR_COUNT = cfg.count;
+  CONNECTION_DIST = cfg.connDist;
+  MOUSE_CONNECTION_DIST = cfg.mouseDist;
+  
+  while (stars.length > STAR_COUNT) stars.pop();
+  while (stars.length < STAR_COUNT) stars.push(new Star());
+  buildGrid();
+  refreshColorCache();
+}
+
+function initStars() {
+  stars.length = 0;
+  starColorCache.length = 0;
+  for (let i = 0; i < STAR_COUNT; i++) {
+    stars.push(new Star());
+  }
+  refreshColorCache();
+}
+
+function showToast(msg) {
+  toast.textContent = msg;
+  toast.classList.add('show');
+  clearTimeout(toast._timeout);
+  toast._timeout = setTimeout(() => toast.classList.remove('show'), 1500);
+}
+
+// --- Event: Resize ---
+window.addEventListener('resize', () => {
+  resize();
+  initStars();
+});
+
+// --- Event: Mouse ---
+canvas.addEventListener('mousemove', (e) => {
+  mouseX = e.clientX;
+  mouseY = e.clientY;
+  mouseActive = true;
+  hint.style.opacity = '0';
+  
+  // Throttle: spawn particles every other frame
+  if (frame - lastParticleSpawn > 1) {
+    for (let i = 0; i < 3; i++) {
+      addParticle(mouseX + (Math.random() - 0.5) * 10, mouseY + (Math.random() - 0.5) * 10);
+    }
+    lastParticleSpawn = frame;
+  }
+});
+
+canvas.addEventListener('mouseleave', () => {
+  mouseActive = false;
+  hint.style.opacity = '1';
+});
+
+canvas.addEventListener('click', (e) => {
+  if (mouseActive) burstParticles(mouseX, mouseY, 25);
+  const count = Math.floor(Math.random() * 4) + 3;
+  for (let i = 0; i < count; i++) {
+    setTimeout(() => spawnShootingStar(), i * 80);
+  }
+});
+
+// Double-click: pulse wave
+canvas.addEventListener('dblclick', (e) => {
+  spawnWave(e.clientX, e.clientY);
+  burstParticles(e.clientX, e.clientY, 20, Math.random() * 60 + 200);
+  showToast('✦ 能量脉冲 ✦');
+});
+
+// Right-click: vortex toggle
+canvas.addEventListener('contextmenu', (e) => {
+  e.preventDefault();
+  if (!vortexActive) {
+    vortexActive = true;
+    vortexX = e.clientX;
+    vortexY = e.clientY;
+    vortexStrength = 1;
+    document.getElementById('btnVortex').classList.add('active');
+    showToast('🌀 引力漩涡');
+  } else {
+    vortexActive = false;
+    vortexStrength = 0;
+    document.getElementById('btnVortex').classList.remove('active');
+    showToast('漩涡关闭');
+  }
+});
+
+// --- Event: Touch ---
+canvas.addEventListener('touchmove', (e) => {
+  e.preventDefault();
+  mouseX = e.touches[0].clientX;
+  mouseY = e.touches[0].clientY;
+  mouseActive = true;
+  hint.style.opacity = '0';
+  for (let i = 0; i < 3; i++) {
+    addParticle(mouseX + (Math.random() - 0.5) * 10, mouseY + (Math.random() - 0.5) * 10);
+  }
+}, { passive: false });
+
+canvas.addEventListener('touchend', () => {
+  mouseActive = false;
+  hint.style.opacity = '1';
+});
+
+canvas.addEventListener('touchstart', (e) => {
+  if (e.touches.length >= 3) {
+    // 3-finger: energy pulse
+    spawnWave(e.touches[0].clientX, e.touches[0].clientY);
+    burstParticles(e.touches[0].clientX, e.touches[0].clientY, 20);
+    showToast('✦ 能量脉冲 ✦');
+  } else if (e.touches.length === 2) {
+    // 2-finger: toggle vortex
+    vortexActive = !vortexActive;
+    if (vortexActive) {
+      vortexX = e.touches[0].clientX; vortexY = e.touches[0].clientY;
+      vortexStrength = 1;
+      document.getElementById('btnVortex').classList.add('active');
+      showToast('🌀 引力漩涡');
+    } else {
+      vortexStrength = 0;
+      document.getElementById('btnVortex').classList.remove('active');
+      showToast('漩涡关闭');
+    }
+  }
+});
+
+// Long press on mobile = shooting star burst
+let longPressTimer = null;
+canvas.addEventListener('touchstart', (e) => {
+  if (e.touches.length === 1) {
+    longPressTimer = setTimeout(() => {
+      const cx = e.touches[0].clientX, cy = e.touches[0].clientY;
+      burstParticles(cx, cy, 40);
+      for (let i = 0; i < 5; i++) setTimeout(() => spawnShootingStar(cx, cy), i * 60);
+      showToast('🌠 流星召唤');
+    }, 600);
+  }
+}, { passive: true });
+canvas.addEventListener('touchend', () => { clearTimeout(longPressTimer); });
+canvas.addEventListener('touchmove', () => { clearTimeout(longPressTimer); });
+
+// --- Event: Keyboard ---
+window.addEventListener('keydown', (e) => {
+  switch (e.key) {
+    case '1':
+      currentMode = 0;
+      applyMode(0);
+      updateModeButtons();
+      showToast('🌌 ' + modeConfig[0].label);
+      break;
+    case '2':
+      currentMode = 1;
+      applyMode(1);
+      updateModeButtons();
+      showToast('🔷 ' + modeConfig[1].label);
+      break;
+    case '3':
+      currentMode = 2;
+      applyMode(2);
+      updateModeButtons();
+      showToast('🏹 ' + modeConfig[2].label);
+      break;
+    case 'v':
+    case 'V':
+      vortexActive = !vortexActive;
+      if (vortexActive) {
+        vortexX = mouseX > 0 ? mouseX : W / 2;
+        vortexY = mouseY > 0 ? mouseY : H / 2;
+        vortexStrength = 1;
+        document.getElementById('btnVortex').classList.add('active');
+        showToast('🌀 引力漩涡');
+      } else {
+        vortexStrength = 0;
+        document.getElementById('btnVortex').classList.remove('active');
+        showToast('漩涡关闭');
+      }
+      break;
+    case ' ':
+      e.preventDefault();
+      if (mouseActive) spawnWave(mouseX, mouseY);
+      else spawnWave(W / 2, H / 2);
+      showToast('✦ 能量脉冲 ✦');
+      break;
+    case 'r':
+    case 'R':
+      initStars();
+      showToast('🔄 星辰重塑');
+      break;
+  }
+});
+
+// --- Control buttons ---
+function updateModeButtons() {
+  document.querySelectorAll('[data-mode]').forEach(b => {
+    b.classList.toggle('active', parseInt(b.dataset.mode) === currentMode);
+  });
+}
+
+document.querySelectorAll('[data-mode]').forEach(btn => {
+  btn.addEventListener('click', () => {
+    currentMode = parseInt(btn.dataset.mode);
+    applyMode(currentMode);
+    updateModeButtons();
+    showToast(btn.textContent.trim());
+  });
+});
+
+document.getElementById('btnVortex').addEventListener('click', () => {
+  vortexActive = !vortexActive;
+  if (vortexActive) {
+    vortexX = mouseX > 0 ? mouseX : W / 2;
+    vortexY = mouseY > 0 ? mouseY : H / 2;
+    vortexStrength = 1;
+    document.getElementById('btnVortex').classList.add('active');
+    showToast('🌀 引力漩涡');
+  } else {
+    vortexStrength = 0;
+    document.getElementById('btnVortex').classList.remove('active');
+    showToast('漩涡关闭');
+  }
+});
+
+document.getElementById('btnWave').addEventListener('click', () => {
+  const wx = mouseActive ? mouseX : W/2, wy = mouseActive ? mouseY : H/2;
+  spawnWave(wx, wy);
+  burstParticles(wx, wy, 20);
+  showToast('✦ 能量脉冲 ✦');
+});
+
+// ── Star color cache (rebuilt every 60 frames) ──
+const starColorCache = [];
+let cacheFrame = -99;
+function refreshColorCache() {
+  for (let i = 0; i < stars.length; i++) {
+    const s = stars[i];
+    const h = s.hue, sa = s.saturation, l = s.lightness;
+    starColorCache[i] = {
+      g0: `hsla(${h},${sa}%,${l}%,`,
+      g03: `hsla(${h},${sa}%,${l}%,`,
+      c0: `hsla(${h},${sa}%,${Math.min(100,l+15)}%,`,
+      inner: `hsla(${h},${sa}%,${Math.min(100,l+20)}%,`,
+    };
+  }
+  cacheFrame = frame;
+}
+
+// Fast star draw using cached prefixes
+function drawStarFast(s, cache) {
+  const a = s.alpha, r6 = s.radius * 6, r2 = s.radius * 2, r13 = s.radius * 1.3;
+  const glow = ctx.createRadialGradient(s.x, s.y, 0, s.x, s.y, r6);
+  glow.addColorStop(0, cache.g0 + a + ')');
+  glow.addColorStop(0.3, cache.g03 + (a * 0.6).toFixed(3) + ')');
+  glow.addColorStop(1, 'transparent');
+  ctx.beginPath(); ctx.arc(s.x, s.y, r6, 0, Math.PI*2); ctx.fillStyle = glow; ctx.fill();
+  const core = ctx.createRadialGradient(s.x, s.y, 0, s.x, s.y, r2);
+  core.addColorStop(0, cache.c0 + Math.min(1, a + 0.4).toFixed(3) + ')');
+  core.addColorStop(1, 'transparent');
+  ctx.beginPath(); ctx.arc(s.x, s.y, r2, 0, Math.PI*2); ctx.fillStyle = core; ctx.fill();
+  ctx.beginPath(); ctx.arc(s.x, s.y, r13, 0, Math.PI*2);
+  ctx.fillStyle = cache.inner + Math.min(1, a + 0.5).toFixed(3) + ')';
+  ctx.fill();
+}
+
+// ── Draw connections ──
+function drawConnection(x1, y1, x2, y2, alpha, hue, width) {
+  const grad = ctx.createLinearGradient(x1, y1, x2, y2);
+  grad.addColorStop(0, `hsla(${hue}, 60%, 70%, ${(alpha * 0.8).toFixed(3)})`);
+  grad.addColorStop(0.5, `hsla(${hue}, 60%, 80%, ${(alpha * 0.5).toFixed(3)})`);
+  grad.addColorStop(1, `hsla(${hue}, 60%, 70%, ${(alpha * 0.8).toFixed(3)})`);
+  ctx.beginPath();
+  ctx.moveTo(x1, y1);
+  ctx.lineTo(x2, y2);
+  ctx.strokeStyle = grad;
+  ctx.lineWidth = width || 0.8;
+  ctx.stroke();
+}
+
+// Fast bulk line (single color, no gradient) for star-star connections
+function drawConnectionFast(x1, y1, x2, y2, alpha, hue) {
+  ctx.strokeStyle = `hsla(${hue},60%,70%,${(alpha * 0.35).toFixed(3)})`;
+  ctx.lineWidth = 0.5;
+  ctx.beginPath();
+  ctx.moveTo(x1, y1); ctx.lineTo(x2, y2);
+  ctx.stroke();
+}
+
+// --- Detect and highlight local constellation ---
+let constellationLabel = null;
+let constellationLabelAlpha = 0;
+let constellationStars = [];
+
+function findLocalConstellation(cx, cy) {
+  const nearby = [];
+  for (const star of stars) {
+    const d = Math.hypot(cx - star.x, cy - star.y);
+    if (d < MOUSE_CONNECTION_DIST * 0.9) {
+      nearby.push({ star, dist: d });
+    }
+  }
+  return nearby.slice(0, 12); // Top 12 nearest
+}
+
+// --- Main Loop ---
+function animate() {
+  frame++;
+  ctx.clearRect(0, 0, W, H);
+  
+  // Deep space background with subtle nebula
+  const bg = ctx.createRadialGradient(W/2, H/2, 0, W/2, H/2, Math.max(W, H) * 0.9);
+  bg.addColorStop(0, '#0d0d20');
+  bg.addColorStop(0.4, '#080818');
+  bg.addColorStop(1, '#03030c');
+  ctx.fillStyle = bg;
+  ctx.fillRect(0, 0, W, H);
+  
+  // Subtle nebula blobs
+  ctx.globalCompositeOperation = 'lighter';
+  const t = frame * 0.0005;
+  for (let i = 0; i < 3; i++) {
+    const nx = W * (0.2 + i * 0.3) + Math.sin(t + i * 2) * 40;
+    const ny = H * (0.3 + i * 0.2) + Math.cos(t + i * 2.5) * 30;
+    const nr = Math.min(W, H) * 0.25;
+    const nebula = ctx.createRadialGradient(nx, ny, 0, nx, ny, nr);
+    nebula.addColorStop(0, `hsla(${210 + i * 40}, 60%, 30%, 0.03)`);
+    nebula.addColorStop(1, 'transparent');
+    ctx.beginPath();
+    ctx.arc(nx, ny, nr, 0, Math.PI * 2);
+    ctx.fillStyle = nebula;
+    ctx.fill();
+  }
+  ctx.globalCompositeOperation = 'source-over';
+  
+  // Draw pulse waves + apply push force to nearby stars
+  for (let i = waves.length - 1; i >= 0; i--) {
+    const w = waves[i];
+    w.radius += w.speed;
+    w.life = 1 - w.radius / w.maxRadius;
+    if (w.life <= 0) {
+      waves.splice(i, 1);
+      continue;
+    }
+    
+    // ── Physics: push stars and particles at the wavefront ──
+    const ringWidth = 30 + w.life * 20;
+    for (const star of stars) {
+      const dx = star.x - w.x, dy = star.y - w.y;
+      const d = Math.hypot(dx, dy);
+      const nearRing = Math.abs(d - w.radius);
+      if (nearRing < ringWidth && d > 1) {
+        const pushForce = w.life * (1 - nearRing / ringWidth) * 4;
+        star.trappedVx += (dx / d) * pushForce;
+        star.trappedVy += (dy / d) * pushForce;
+      }
+    }
+    // Also push trail particles
+    for (const p of particles) {
+      const dx = p.x - w.x, dy = p.y - w.y;
+      const d = Math.hypot(dx, dy);
+      const nearRing = Math.abs(d - w.radius);
+      if (nearRing < ringWidth && d > 1) {
+        const pushForce = w.life * (1 - nearRing / ringWidth) * 5;
+        p.vx += (dx / d) * pushForce;
+        p.vy += (dy / d) * pushForce;
+      }
+    }
+    
+    // ── Draw outer ring ──
+    ctx.beginPath();
+    ctx.arc(w.x, w.y, w.radius, 0, Math.PI * 2);
+    ctx.strokeStyle = `hsla(${w.hue}, 80%, 65%, ${w.life * 0.6})`;
+    ctx.lineWidth = w.life * 4 + 1;
+    ctx.stroke();
+    
+    // ── Draw inner ring ──
+    ctx.beginPath();
+    ctx.arc(w.x, w.y, w.radius * 0.7, 0, Math.PI * 2);
+    ctx.strokeStyle = `hsla(${w.hue}, 80%, 75%, ${w.life * 0.35})`;
+    ctx.lineWidth = w.life * 2;
+    ctx.stroke();
+  }
+  
+  // Vortex glow
+  if (vortexActive && vortexStrength > 0) {
+    const vGlow = ctx.createRadialGradient(vortexX, vortexY, 0, vortexX, vortexY, 300);
+    vGlow.addColorStop(0, 'rgba(100, 150, 255, 0.12)');
+    vGlow.addColorStop(0.3, 'rgba(80, 120, 255, 0.05)');
+    vGlow.addColorStop(1, 'transparent');
+    ctx.beginPath();
+    ctx.arc(vortexX, vortexY, 300, 0, Math.PI * 2);
+    ctx.fillStyle = vGlow;
+    ctx.fill();
+    
+    // Spiral arms hint
+    for (let a = 0; a < 3; a++) {
+      const baseAngle = frame * 0.02 + a * Math.PI * 2 / 3;
+      ctx.beginPath();
+      for (let r = 0; r < 250; r += 5) {
+        const angle = baseAngle + r * 0.02;
+        const sx = vortexX + Math.cos(angle) * r;
+        const sy = vortexY + Math.sin(angle) * r;
+        if (r === 0) ctx.moveTo(sx, sy);
+        else ctx.lineTo(sx, sy);
+      }
+      ctx.strokeStyle = `rgba(150, 180, 255, ${0.08 * vortexStrength})`;
+      ctx.lineWidth = 1;
+      ctx.stroke();
+    }
+    
+    // Vortex core
+    const coreGlow = ctx.createRadialGradient(vortexX, vortexY, 0, vortexX, vortexY, 20);
+    coreGlow.addColorStop(0, 'rgba(200, 220, 255, 0.7)');
+    coreGlow.addColorStop(1, 'transparent');
+    ctx.beginPath();
+    ctx.arc(vortexX, vortexY, 20, 0, Math.PI * 2);
+    ctx.fillStyle = coreGlow;
+    ctx.fill();
+  }
+  
+  // ── Update stars + build spatial grid ──
+  clearGrid();
+  for (let i = 0; i < stars.length; i++) {
+    stars[i].update();
+    insertStar(stars[i], i);
+  }
+  
+  // Refresh color cache every 60 frames
+  if (frame - cacheFrame > 60) refreshColorCache();
+  
+  // Draw stars using cached color strings
+  for (let i = 0; i < stars.length; i++) {
+    drawStarFast(stars[i], starColorCache[i]);
+  }
+  
+  // ── Star-star connections via spatial grid (O(n) average vs O(n²)) ──
+  for (let cy = 0; cy < gridRows; cy++) {
+    for (let cx = 0; cx < gridCols; cx++) {
+      const cell = spatialGrid[cy * gridCols + cx];
+      if (cell.length === 0) continue;
+      const neighbors = [[cx,cy],[cx+1,cy],[cx,cy+1],[cx+1,cy+1],[cx-1,cy+1]];
+      for (const [nx, ny] of neighbors) {
+        if (nx < 0 || nx >= gridCols || ny < 0 || ny >= gridRows) continue;
+        const otherCell = spatialGrid[ny * gridCols + nx];
+        if (otherCell.length === 0) continue;
+        for (let a = 0; a < cell.length; a++) {
+          const ia = cell[a], sa = stars[ia];
+          const startJ = (nx === cx && ny === cy) ? a + 1 : 0;
+          for (let b = startJ; b < otherCell.length; b++) {
+            const ib = otherCell[b];
+            if (ib <= ia && nx === cx && ny === cy) continue;
+            const sb = stars[ib];
+            const dx = sa.x - sb.x, dy = sa.y - sb.y;
+            if (Math.abs(dx) < CONNECTION_DIST && Math.abs(dy) < CONNECTION_DIST) {
+              const dist = Math.hypot(dx, dy);
+              if (dist < CONNECTION_DIST) {
+                const alpha = (1 - dist / CONNECTION_DIST) * 0.2;
+                const avgHue = (sa.hue + sb.hue) * 0.5;
+                drawConnectionFast(sa.x, sa.y, sb.x, sb.y, alpha, avgHue);
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+  
+  // ── Local constellation detection ──
+  if (mouseActive) {
+    constellationStars = findLocalConstellation(mouseX, mouseY);
+    if (constellationStars.length >= 4) {
+      constellationLabelAlpha = Math.min(1, constellationLabelAlpha + 0.05);
+      for (const { star: s } of constellationStars) {
+        const hlGlow = ctx.createRadialGradient(s.x, s.y, 0, s.x, s.y, s.radius * 8);
+        hlGlow.addColorStop(0, `rgba(200,220,255,${(0.25*constellationLabelAlpha).toFixed(3)})`);
+        hlGlow.addColorStop(1, 'transparent');
+        ctx.beginPath(); ctx.arc(s.x, s.y, s.radius * 8, 0, Math.PI*2); ctx.fillStyle = hlGlow; ctx.fill();
+      }
+      for (let i = 0; i < constellationStars.length; i++) {
+        for (let j = i+1; j < constellationStars.length; j++) {
+          const sa = constellationStars[i].star, sb = constellationStars[j].star;
+          const d = Math.hypot(sa.x - sb.x, sa.y - sb.y);
+          if (d < MOUSE_CONNECTION_DIST * 0.8) {
+            drawConnection(sa.x, sa.y, sb.x, sb.y,
+              (1 - d/(MOUSE_CONNECTION_DIST*0.8)) * 0.5 * constellationLabelAlpha, 200, 1.0);
+          }
+        }
+      }
+      if (!constellationLabel) {
+        constellationLabel = constellationNames[Math.floor(Math.random() * constellationNames.length)];
+      }
+      const avgX = constellationStars.reduce((s, c) => s + c.star.x, 0) / constellationStars.length;
+      const avgY = constellationStars.reduce((s, c) => s + c.star.y, 0) / constellationStars.length;
+      ctx.fillStyle = `rgba(200,220,255,${(constellationLabelAlpha*0.8).toFixed(3)})`;
+      ctx.font = '13px "Segoe UI", system-ui, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText(constellationLabel, avgX, avgY - 25);
+    } else {
+      constellationLabelAlpha = Math.max(0, constellationLabelAlpha - 0.05);
+      if (constellationLabelAlpha <= 0) constellationLabel = null;
+    }
+  } else {
+    constellationLabelAlpha = Math.max(0, constellationLabelAlpha - 0.03);
+    if (constellationLabelAlpha <= 0) constellationLabel = null;
+    constellationStars = [];
+  }
+  
+  // Mouse connections
+  if (mouseActive) {
+    const glow = ctx.createRadialGradient(mouseX, mouseY, 0, mouseX, mouseY, MOUSE_RADIUS * 3);
+    glow.addColorStop(0, 'rgba(150, 180, 255, 0.06)');
+    glow.addColorStop(0.5, 'rgba(120, 150, 255, 0.03)');
+    glow.addColorStop(1, 'transparent');
+    ctx.beginPath();
+    ctx.arc(mouseX, mouseY, MOUSE_RADIUS * 3, 0, Math.PI * 2);
+    ctx.fillStyle = glow;
+    ctx.fill();
+    
+    for (const star of stars) {
+      const dx = mouseX - star.x;
+      const dy = mouseY - star.y;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      if (dist < MOUSE_CONNECTION_DIST) {
+        const alpha = (1 - dist / MOUSE_CONNECTION_DIST) * 0.7;
+        drawConnection(mouseX, mouseY, star.x, star.y, alpha, star.hue);
+      }
+    }
+    
+    ctx.beginPath();
+    ctx.arc(mouseX, mouseY, 8, 0, Math.PI * 2);
+    ctx.strokeStyle = 'rgba(200, 220, 255, 0.2)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+    
+    ctx.beginPath();
+    ctx.arc(mouseX, mouseY, 3, 0, Math.PI * 2);
+    const cursorGlow = ctx.createRadialGradient(mouseX, mouseY, 0, mouseX, mouseY, 18);
+    cursorGlow.addColorStop(0, 'rgba(220, 235, 255, 0.95)');
+    cursorGlow.addColorStop(0.3, 'rgba(160, 200, 255, 0.5)');
+    cursorGlow.addColorStop(1, 'transparent');
+    ctx.fillStyle = cursorGlow;
+    ctx.fill();
+  }
+  
+  // Update & draw particles
+  for (let i = particles.length - 1; i >= 0; i--) {
+    particles[i].update();
+    particles[i].draw(ctx);
+    if (particles[i].life <= 0) particles.splice(i, 1);
+  }
+  
+  // Shooting stars
+  for (let i = shootingStars.length - 1; i >= 0; i--) {
+    const ss = shootingStars[i];
+    ss.x += ss.vx;
+    ss.y += ss.vy;
+    ss.life -= ss.decay;
+    
+    if (ss.life <= 0 || ss.x < -100 || ss.x > W + 100 || ss.y > H + 100) {
+      shootingStars.splice(i, 1);
+      continue;
+    }
+    
+    const tailX = ss.x - ss.vx * ss.length * 0.15;
+    const tailY = ss.y - ss.vy * ss.length * 0.15;
+    
+    const grad = ctx.createLinearGradient(ss.x, ss.y, tailX, tailY);
+    grad.addColorStop(0, `rgba(255, 255, 255, ${ss.life})`);
+    grad.addColorStop(0.3, `rgba(180, 200, 255, ${ss.life * 0.6})`);
+    grad.addColorStop(1, 'rgba(255, 255, 255, 0)');
+    
+    ctx.beginPath();
+    ctx.moveTo(ss.x, ss.y);
+    ctx.lineTo(tailX, tailY);
+    ctx.strokeStyle = grad;
+    ctx.lineWidth = 2;
+    ctx.lineCap = 'round';
+    ctx.stroke();
+    ctx.lineCap = 'butt';
+    
+    // Head glow
+    const headGlow = ctx.createRadialGradient(ss.x, ss.y, 0, ss.x, ss.y, 8);
+    headGlow.addColorStop(0, `rgba(255, 255, 255, ${ss.life})`);
+    headGlow.addColorStop(0.4, `rgba(200, 220, 255, ${ss.life * 0.5})`);
+    headGlow.addColorStop(1, 'rgba(255, 255, 255, 0)');
+    ctx.beginPath();
+    ctx.arc(ss.x, ss.y, 8, 0, Math.PI * 2);
+    ctx.fillStyle = headGlow;
+    ctx.fill();
+  }
+  
+  // Random shooting stars — much more frequent
+  if (Math.random() < 0.02) spawnShootingStar();
+  
+  // Vortex particles animation
+  if (vortexActive && vortexStrength > 0) {
+    if (frame % 3 === 0) spawnVortexParticles();
+    for (let i = vortexParticles.length - 1; i >= 0; i--) {
+      const vp = vortexParticles[i];
+      vp.angle += vp.speed;
+      vp.dist = vp.dist * 0.995 + 2;
+      vp.life -= vp.decay;
+      if (vp.life <= 0) {
+        vortexParticles.splice(i, 1);
+        continue;
+      }
+      const px = vortexX + Math.cos(vp.angle) * vp.dist;
+      const py = vortexY + Math.sin(vp.angle) * vp.dist;
+      ctx.beginPath();
+      ctx.arc(px, py, vp.size * 3, 0, Math.PI * 2);
+      const pGlow = ctx.createRadialGradient(px, py, 0, px, py, vp.size * 3);
+      pGlow.addColorStop(0, `rgba(180, 210, 255, ${vp.life * 0.6})`);
+      pGlow.addColorStop(1, 'transparent');
+      ctx.fillStyle = pGlow;
+      ctx.fill();
+    }
+    // Limit vortex particles
+    if (vortexParticles.length > 100) vortexParticles.splice(0, vortexParticles.length - 100);
+  }
+  
+  // Stats
+  if (frame % 30 === 0) {
+    const connected = mouseActive ? 
+      stars.filter(s => {
+        const d = Math.hypot(mouseX - s.x, mouseY - s.y);
+        return d < MOUSE_CONNECTION_DIST;
+      }).length : 0;
+    const modeName = ['默认', '密网', '猎户'][currentMode];
+    statsEl.innerHTML = 
+      `✦ ${stars.length} 颗星<br>` +
+      `⋈ ${connected} 条连线<br>` +
+      `· ${particles.length} 个粒子<br>` +
+      `⚡ ${waves.length} 脉冲波<br>` +
+      (vortexActive ? `🌀 漩涡活跃` : `🌌 ${modeName}模式`);
+  }
+  
+  requestAnimationFrame(animate);
+}
+
+// --- Start ---
+resize();
+initStars();
+animate();
+</script>
+</body>
+</html>

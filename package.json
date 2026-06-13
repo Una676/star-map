@@ -1,0 +1,6 @@
+{
+  "name": "star-map",
+  "scripts": {
+    "build": "echo done"
+  }
+}
